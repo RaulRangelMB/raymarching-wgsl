@@ -55,5 +55,3 @@ Você pode calcular sua nota com base nas cenas que você fez. Você sempre pode
 
 ### Entrega:
 Via Blackboard, entregue o link do git.
-
-#### Dia 27/11/24
