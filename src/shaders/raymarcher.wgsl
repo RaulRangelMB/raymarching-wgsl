@@ -35,7 +35,14 @@ struct march_output {
 fn op_smooth_union(d1: f32, d2: f32, col1: vec3f, col2: vec3f, k: f32) -> vec4f
 {
   var k_eps = max(k, 0.0001);
-  return vec4f(col1, d1);
+  
+  let h = clamp(0.5 + 0.5 * (d2 - d1) / k_eps, 0.0, 1.0);
+
+  let d = mix(d2, d1, h) - k_eps * h * (1.0 - h);
+
+  let col = mix(col2, col1, h);
+
+  return vec4f(col, d);
 }
 
 fn op_smooth_subtraction(d1: f32, d2: f32, col1: vec3f, col2: vec3f, k: f32) -> vec4f
@@ -103,15 +110,35 @@ fn scene(p: vec3f) -> vec4f // xyz = color, w = distance
       // x: shape type (0: sphere, 1: box, 2: torus)
       // y: shape index
       // order matters for the operations, they're sorted on the CPU side
+      let info = shapesinfob[i];
+      let shape_type = i32(info.x);
+      let shape_index = i32(info.y);
+      let s = shapesb[shape_index];
 
       // call transform_p and the sdf for the shape
-      // call op function with the shape operation
+      var p_relative = p - s.transform.xyz;
+      let p_transformed = transform_p(p_relative, s.op.zw);
 
+      if (shape_type == 0)
+      {
+          d = sdf_sphere(p_transformed, s.radius, s.quat);
+      }
+      else if (shape_type == 1)
+      {
+          d = sdf_round_box(p_transformed, s.radius.xyz, s.radius.w, s.quat);
+      }
+      else if (shape_type == 2)
+      {
+          d = sdf_torus(p_transformed, s.radius.xy, s.quat);
+      }
+
+      // call op function with the shape operation
       // op format:
       // x: operation (0: union, 1: subtraction, 2: intersection)
       // y: k value
       // z: repeat mode (0: normal, 1: repeat)
       // w: repeat offset
+      result = op(s.op.x, result.w, d, result.xyz, s.color.xyz, s.op.y);
     }
 
     return result;
@@ -124,27 +151,74 @@ fn march(ro: vec3f, rd: vec3f) -> march_output
 
   var depth = 0.0;
   var color = vec3f(0.0);
-  var march_step = uniforms[22];
+  var march_step = i32(uniforms[22]);
+  var min_dist = MAX_DIST;
   
-  for (var i = 0; i < max_marching_steps; i = i + 1)
+  for (var i = 0; i < max_marching_steps; i = i + march_step)
   {
       // raymarch algorithm
       // call scene function and march
-      // if the depth is greater than the max distance or the distance is less than the epsilon, break
+
+      let p = ro + rd * depth;
+      let sc = scene(p);
+
+      // save minimum distance
+      min_dist = min(min_dist, sc.w);
+
+      // hit
+      if (sc.w < EPSILON)
+      {
+        // Encontramos uma superfície. Retorne a cor do objeto e a profundidade.
+        return march_output(sc.xyz, depth, false);
+      }
+
+      // march
+      depth += sc.w;
+
+      // break if ray goes past MAX_DIST
+      if (depth > MAX_DIST){
+        break;
+      } 
   }
 
-  return march_output(color, depth, false);
+  // miss
+  return march_output(vec3f(0.0), MAX_DIST, false);
 }
 
 fn get_normal(p: vec3f) -> vec3f
 {
-  return vec3f(0.0);
+  let e = uniforms[23];
+
+  let grad = vec3f(
+    scene(vec3(p.x + e, p.y, p.z)).w - scene(vec3(p.x - e, p.y, p.z)).w,
+    scene(vec3(p.x, p.y + e, p.z)).w - scene(vec3(p.x, p.y - e, p.z)).w,
+    scene(vec3(p.x, p.y, p.z + e)).w - scene(vec3(p.x, p.y, p.z - e)).w
+  );
+
+  return normalize(grad);
 }
 
 // https://iquilezles.org/articles/rmshadows/
 fn get_soft_shadow(ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, k: f32) -> f32
 {
-  return 0.0;
+  var res = 1.0;
+  var t = tmin;
+  let e = uniforms[23];
+
+  for (var i = 0; i < 256; i++)
+  {
+    if (t >= tmax) {
+      break;
+    }
+
+    var h = scene(ro + rd*t).w;
+    if (h < e){
+      return 0.0;
+    }
+    res = min(res, k*h/t);
+    t += h;
+  }
+  return clamp(res, 0.0, 1.0);
 }
 
 fn get_AO(current: vec3f, normal: vec3f) -> f32
@@ -193,13 +267,23 @@ fn get_light(current: vec3f, obj_color: vec3f, rd: vec3f) -> vec3f
     return ambient;
   }
 
-  // calculate the light intensity
-  // Use:
-  // - shadow
-  // - ambient occlusion (optional)
-  // - ambient light
-  // - object color
-  return ambient;
+  var light_dir = normalize(light_position);
+
+  // diffuse
+  let diffuse = max(dot(normal, light_dir), 0.0);
+
+  // shadow
+  let shadow = get_soft_shadow(current + normal * 0.02, light_dir, uniforms[24], uniforms[25], 100.0);
+  
+  // ambient occlusion
+  var ao = get_AO(current, normal);
+
+  var ambient_term = ambient * ao;
+  var diffuse_term = diffuse * sun_color * shadow;
+
+  var color = (ambient_term + diffuse_term) * obj_color;
+
+  return color;
 }
 
 fn set_camera(ro: vec3f, ta: vec3f, cr: f32) -> mat3x3<f32>
@@ -232,6 +316,11 @@ fn preprocess(@builtin(global_invocation_id) id : vec3u)
 
   // optional: performance boost
   // Do all the transformations here and store them in the buffer since this is called only once per object and not per pixel
+
+  let info = shapesinfob[id.x];
+  let shape_index = i32(info.y);
+
+  shapesb[shape_index].quat = quaternion_from_euler(shapesb[shape_index].rotation.xyz);
 }
 
 @compute @workgroup_size(THREAD_COUNT, THREAD_COUNT, 1)
@@ -254,10 +343,22 @@ fn render(@builtin(global_invocation_id) id : vec3u)
   var rd = camera * normalize(vec3(uv, 1.0));
 
   // call march function and get the color/depth
-  // move ray based on the depth
-  // get light
-  var color = vec3f(1.0);
-  
+  var march_result = march(ro, rd);
+  var depth = march_result.depth;
+  var color = vec3f(0.0);
+
+  if (depth < MAX_DIST){
+    // move ray based on the depth
+    var p = ro + rd * march_result.depth;
+    // get light
+    color = get_light(p, march_result.color, rd);
+  }
+  else{
+    var sun_position = vec3f(uniforms[13], uniforms[14], uniforms[15]);
+    var sun_color = int_to_rgb(i32(uniforms[16]));
+    color = get_ambient_light(sun_position, sun_color, rd);
+  }
+
   // display the result
   color = linear_to_gamma(color);
   fb[mapfb(id.xy, uniforms[1])] = vec4(color, 1.0);
