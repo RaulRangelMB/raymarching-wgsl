@@ -67,7 +67,7 @@ fn op_smooth_intersection(d1: f32, d2: f32, col1: vec3f, col2: vec3f, k: f32) ->
   var d_res = mix(d2, d1, h) + k_eps * h * (1.0 - h);
   
   var col_res = mix(col2, col1, h);
-  
+
   return vec4f(col_res, d_res);
 }
 
@@ -91,7 +91,7 @@ fn op(op: f32, d1: f32, d2: f32, col1: vec3f, col2: vec3f, k: f32) -> vec4f
 
 fn repeat(p: vec3f, offset: vec3f) -> vec3f
 {
-  return vec3f(0.0);
+  return modc(p + 0.5 * offset, offset) - 0.5 * offset;
 }
 
 fn transform_p(p: vec3f, option: vec2f) -> vec3f
@@ -227,22 +227,18 @@ fn get_soft_shadow(ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, k: f32) -> f32
 {
   var res = 1.0;
   var t = tmin;
-  let e = uniforms[23];
 
-  for (var i = 0; i < 256; i++)
+  for (var i = 0; i < 256 && t < tmax; i = i + 1)
   {
-    if (t >= tmax) {
+    var h = scene(ro + rd * t).w;
+    res = min(res, h/(k*t)); 
+    t += clamp(h, 0.005, 0.50);
+    if (res < -1.0 || t >= tmax) {
       break;
     }
-
-    var h = scene(ro + rd*t).w;
-    if (h < e){
-      return 0.0;
-    }
-    res = min(res, k*h/t);
-    t += h;
   }
-  return clamp(res, 0.0, 1.0);
+  res = max(res, -1.0);
+  return 0.25 * (1.0 + res)*(1.0 + res)*(2.0 - res); 
 }
 
 fn get_AO(current: vec3f, normal: vec3f) -> f32
@@ -297,7 +293,7 @@ fn get_light(current: vec3f, obj_color: vec3f, rd: vec3f) -> vec3f
   let diffuse = max(dot(normal, light_dir), 0.0);
 
   // shadow
-  let shadow = get_soft_shadow(current + normal * 0.02, light_dir, uniforms[24], uniforms[25], 100.0);
+  let shadow = get_soft_shadow(current + normal * 0.02, light_dir, uniforms[24], uniforms[25], uniforms[21]);
   
   // ambient occlusion
   var ao = get_AO(current, normal);
