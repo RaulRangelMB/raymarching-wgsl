@@ -48,13 +48,27 @@ fn op_smooth_union(d1: f32, d2: f32, col1: vec3f, col2: vec3f, k: f32) -> vec4f
 fn op_smooth_subtraction(d1: f32, d2: f32, col1: vec3f, col2: vec3f, k: f32) -> vec4f
 {
   var k_eps = max(k, 0.0001);
-  return vec4f(col1, d1);
+
+  var h = clamp(0.5 - 0.5 * (d2 + d1) / k_eps, 0.0, 1.0);
+
+  var d_res = mix(d2, -d1, h) + k_eps * h * (1.0 - h);
+
+  var col_res = mix(col2, col1, h);
+
+  return vec4f(col_res, d_res);
 }
 
 fn op_smooth_intersection(d1: f32, d2: f32, col1: vec3f, col2: vec3f, k: f32) -> vec4f
 {
   var k_eps = max(k, 0.0001);
-  return vec4f(col1, d1);
+
+  var h = clamp(0.5 - 0.5 * (d2 - d1) / k_eps, 0.0, 1.0);
+
+  var d_res = mix(d2, d1, h) + k_eps * h * (1.0 - h);
+  
+  var col_res = mix(col2, col1, h);
+  
+  return vec4f(col_res, d_res);
 }
 
 fn op(op: f32, d1: f32, d2: f32, col1: vec3f, col2: vec3f, k: f32) -> vec4f
@@ -116,20 +130,20 @@ fn scene(p: vec3f) -> vec4f // xyz = color, w = distance
       let s = shapesb[shape_index];
 
       // call transform_p and the sdf for the shape
-      var p_relative = p - s.transform.xyz;
+      var p_relative = p - s.transform_animated.xyz;
       let p_transformed = transform_p(p_relative, s.op.zw);
 
       if (shape_type == 0)
       {
-          d = sdf_sphere(p_transformed, s.radius, s.quat);
+        d = sdf_sphere(p_transformed, s.radius, s.quat);
       }
       else if (shape_type == 1)
       {
-          d = sdf_round_box(p_transformed, s.radius.xyz, s.radius.w, s.quat);
+        d = sdf_round_box(p_transformed, s.radius.xyz + s.radius.w, s.radius.w, s.quat);
       }
       else if (shape_type == 2)
       {
-          d = sdf_torus(p_transformed, s.radius.xy, s.quat);
+        d = sdf_torus(p_transformed, s.radius.xy, s.quat);
       }
 
       // call op function with the shape operation
@@ -153,6 +167,8 @@ fn march(ro: vec3f, rd: vec3f) -> march_output
   var color = vec3f(0.0);
   var march_step = i32(uniforms[22]);
   var min_dist = MAX_DIST;
+  var has_outline = uniforms[26];
+  var outline_w = uniforms[27];
   
   for (var i = 0; i < max_marching_steps; i = i + march_step)
   {
@@ -182,6 +198,14 @@ fn march(ro: vec3f, rd: vec3f) -> march_output
   }
 
   // miss
+  // check if outline
+  if (has_outline > 0.0 && min_dist < outline_w)
+  {
+    var outline_color = vec3f(1.0) * uniforms[28];
+    return march_output(outline_color, MAX_DIST, true); 
+  }
+
+  // no outline
   return march_output(vec3f(0.0), MAX_DIST, false);
 }
 
@@ -295,9 +319,13 @@ fn set_camera(ro: vec3f, ta: vec3f, cr: f32) -> mat3x3<f32>
   return mat3x3<f32>(cu, cv, cw);
 }
 
-fn animate(val: vec3f, time_scale: f32, offset: f32) -> vec3f
-{
-  return vec3f(0.0);
+fn animate(val: vec3f, amplitude: vec3f, time_scale: f32, offset: f32) -> vec3f {
+    var angle = time_scale * offset;
+    var x = amplitude.x * sin(angle);
+    var z = amplitude.z * cos(angle);
+    var y = amplitude.y * cos(angle);
+
+    return val + vec3f(x, y, z);
 }
 
 @compute @workgroup_size(THREAD_COUNT, 1, 1)
@@ -319,8 +347,13 @@ fn preprocess(@builtin(global_invocation_id) id : vec3u)
 
   let info = shapesinfob[id.x];
   let shape_index = i32(info.y);
+  var shape = shapesb[shape_index];
 
-  shapesb[shape_index].quat = quaternion_from_euler(shapesb[shape_index].rotation.xyz);
+  var animated_transform = animate(shape.transform.xyz, shape.animate_transform.xyz, shape.animate_transform.w, time);
+  var animated_rotation = animate(shape.rotation.xyz, shape.animate_rotation.xyz, shape.animate_rotation.w, time);
+
+  shapesb[shape_index].quat = quaternion_from_euler(animated_rotation);
+  shapesb[shape_index].transform_animated = vec4f(animated_transform, shape.transform.w);
 }
 
 @compute @workgroup_size(THREAD_COUNT, THREAD_COUNT, 1)
@@ -347,7 +380,12 @@ fn render(@builtin(global_invocation_id) id : vec3u)
   var depth = march_result.depth;
   var color = vec3f(0.0);
 
-  if (depth < MAX_DIST){
+  // check if outline
+  if (march_result.outline)
+  {
+    color = march_result.color;
+  }
+  else if (depth < MAX_DIST){
     // move ray based on the depth
     var p = ro + rd * march_result.depth;
     // get light
