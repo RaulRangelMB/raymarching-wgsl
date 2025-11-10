@@ -165,12 +165,12 @@ fn march(ro: vec3f, rd: vec3f) -> march_output
 
   var depth = 0.0;
   var color = vec3f(0.0);
-  var march_step = i32(uniforms[22]);
+  var march_step = uniforms[22];
   var min_dist = MAX_DIST;
   var has_outline = uniforms[26];
   var outline_w = uniforms[27];
   
-  for (var i = 0; i < max_marching_steps; i = i + march_step)
+  for (var i = 0; i < max_marching_steps; i = i + 1)
   {
       // raymarch algorithm
       // call scene function and march
@@ -184,12 +184,13 @@ fn march(ro: vec3f, rd: vec3f) -> march_output
       // hit
       if (sc.w < EPSILON)
       {
-        // Encontramos uma superfície. Retorne a cor do objeto e a profundidade.
         return march_output(sc.xyz, depth, false);
       }
 
       // march
-      depth += sc.w;
+      depth += sc.w * march_step;
+
+      color = vec3f(sc.xyz);
 
       // break if ray goes past MAX_DIST
       if (depth > MAX_DIST){
@@ -206,12 +207,12 @@ fn march(ro: vec3f, rd: vec3f) -> march_output
   }
 
   // no outline
-  return march_output(vec3f(0.0), MAX_DIST, false);
+  return march_output(color, depth, false);
 }
 
 fn get_normal(p: vec3f) -> vec3f
 {
-  let e = uniforms[23];
+  let e = 0.0001;
 
   let grad = vec3f(
     scene(vec3(p.x + e, p.y, p.z)).w - scene(vec3(p.x - e, p.y, p.z)).w,
@@ -287,7 +288,7 @@ fn get_light(current: vec3f, obj_color: vec3f, rd: vec3f) -> vec3f
     return ambient;
   }
 
-  var light_dir = normalize(light_position);
+  var light_dir = normalize(light_position - current);
 
   // diffuse
   let diffuse = max(dot(normal, light_dir), 0.0);
